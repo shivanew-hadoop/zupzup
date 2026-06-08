@@ -19,5 +19,12 @@
     "plan": "monthly",
     "validTill": "2026-06-10",
     "active": true
+  },
+  "demo@gmail.com": {
+    "name": "Demo Customer",
+    "licenseKey": "ZZP-2026-ABCD-1234",
+    "plan": "monthly",
+    "validTill": "2026-12-31",
+    "active": true
   }
 }
