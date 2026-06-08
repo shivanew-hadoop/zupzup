@@ -160,4 +160,4 @@ wss.on('connection', (client, req) => {
   });
 });
 
-server.listen(PORT, () => console.log(`[Backend] Running on http://localhost:${PORT}`));
+server.listen(PORT, () => console.log(`[Backend] Running on https://zupzup-production.up.railway.app:${PORT}`));
