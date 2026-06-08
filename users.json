@@ -1,0 +1,23 @@
+{
+  "demo@example.com": {
+    "name": "Demo User",
+    "licenseKey": "DEMO-1234-5678",
+    "plan": "monthly",
+    "validTill": "2026-12-31",
+    "active": true
+  },
+  "customer1@gmail.com": {
+    "name": "Customer One",
+    "licenseKey": "MCS-87B5-280A-E36A-277D-E19F-A9AB",
+    "plan": "monthly",
+    "validTill": "2026-07-07",
+    "active": true
+  },
+  "customer3@gmail.com": {
+    "name": "Customer three",
+    "licenseKey": "MCS-96D4-0527-C276-A2B3-B6CE-7EE7",
+    "plan": "monthly",
+    "validTill": "2026-06-10",
+    "active": true
+  }
+}

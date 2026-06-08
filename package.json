@@ -1,0 +1,17 @@
+{
+  "name": "zupzup",
+  "version": "1.0.0",
+  "description": "License validation and Deepgram proxy backend for Meeting Caption Service",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "create-license": "node scripts/create-license.js"
+  },
+  "dependencies": {
+    "@deepgram/sdk": "^3.3.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}
