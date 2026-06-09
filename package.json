@@ -1,5 +1,5 @@
 {
-  "name": "zupzup",
+  "name": "meeting-caption-backend",
   "version": "1.0.0",
   "description": "License validation and Deepgram proxy backend for Meeting Caption Service",
   "main": "server.js",

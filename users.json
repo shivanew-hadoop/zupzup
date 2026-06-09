@@ -7,24 +7,31 @@
     "active": true
   },
   "customer1@gmail.com": {
-    "name": "Customer One",
-    "licenseKey": "MCS-87B5-280A-E36A-277D-E19F-A9AB",
+    "name": "1",
+    "licenseKey": "MCS-76B4-3559-2D26-C635-0F63-B8BB",
     "plan": "monthly",
-    "validTill": "2026-07-07",
+    "validTill": "2026-07-09",
+    "active": true
+  },
+  "customer2@gmail.com": {
+    "name": "2",
+    "licenseKey": "MCS-6FC2-CE2D-F599-419B-118E-7AAA",
+    "plan": "monthly",
+    "validTill": "2026-07-09",
     "active": true
   },
   "customer3@gmail.com": {
-    "name": "Customer three",
-    "licenseKey": "MCS-96D4-0527-C276-A2B3-B6CE-7EE7",
+    "name": "4",
+    "licenseKey": "MCS-FB66-EE5B-DB31-C549-B3DA-09AE",
     "plan": "monthly",
-    "validTill": "2026-06-10",
+    "validTill": "2026-07-09",
     "active": true
   },
-  "demo@gmail.com": {
-    "name": "Demo Customer",
-    "licenseKey": "ZZP-2026-ABCD-1234",
+  "customer5@gmail.com": {
+    "name": "5th one ",
+    "licenseKey": "MCS-2CA2-303F-038A-EDBE-A909-7C34",
     "plan": "monthly",
-    "validTill": "2026-12-31",
+    "validTill": "2026-06-14",
     "active": true
   }
 }
