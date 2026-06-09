@@ -6,267 +6,226 @@ const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const WebSocket = require('ws');
-const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 
 const PORT = Number(process.env.PORT || 8080);
-const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
-
-// Stable Deepgram settings first. Later we can tune gradually.
-const DG_MODEL = process.env.DG_MODEL || 'nova-2';
-const DG_LANGUAGE = process.env.DG_LANGUAGE || 'en-US';
-const DG_ENDPOINTING_MS = Number(process.env.DG_ENDPOINTING_MS || 100);
+const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 
 const USERS_FILE = path.join(__dirname, 'users.json');
 
 if (!DEEPGRAM_API_KEY) {
-  console.warn('[Backend] WARNING: DEEPGRAM_API_KEY missing. STT will not work until configured.');
-}
-
-function loadUsers() {
-  try {
-    return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function validateLicense(email, licenseKey) {
-  const users = loadUsers();
-
-  const cleanEmail = String(email || '').trim().toLowerCase();
-  const cleanKey = String(licenseKey || '').trim();
-
-  const user = users[cleanEmail];
-
-  if (!user) return { ok: false, reason: 'License email not found' };
-  if (!user.active) return { ok: false, reason: 'License inactive' };
-  if (user.licenseKey !== cleanKey) return { ok: false, reason: 'Invalid license key' };
-
-  const today = new Date().toISOString().slice(0, 10);
-  if (user.validTill < today) {
-    return { ok: false, reason: `License expired on ${user.validTill}` };
-  }
-
-  return { ok: true, user };
+  console.warn('[BOOT] WARNING: DEEPGRAM_API_KEY missing');
+} else {
+  console.log('[BOOT] DEEPGRAM_API_KEY present: true');
+  console.log('[BOOT] DEEPGRAM_API_KEY length:', DEEPGRAM_API_KEY.length);
 }
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json());
 
-app.get('/health', (_, res) => {
-  res.json({
-    ok: true,
-    service: 'meeting-caption-backend',
-    deepgramKeyPresent: !!DEEPGRAM_API_KEY,
-    deepgramModel: DG_MODEL
-  });
-});
+function loadUsers() {
+  if (!fs.existsSync(USERS_FILE)) return {};
+  return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+}
 
-app.post('/api/license/check', (req, res) => {
-  const result = validateLicense(req.body.email, req.body.licenseKey);
+function isLicenseValid(email, licenseKey) {
+  const users = loadUsers();
+  const user = users[email];
 
-  if (!result.ok) {
-    return res.status(403).json({
-      ok: false,
-      error: result.reason
-    });
+  if (!user) return { ok: false, reason: 'User not found' };
+  if (!user.active) return { ok: false, reason: 'License inactive' };
+  if (user.licenseKey !== licenseKey) return { ok: false, reason: 'Invalid license key' };
+
+  const today = new Date();
+  const validTill = new Date(`${user.validTill}T23:59:59`);
+
+  if (Number.isNaN(validTill.getTime()) || validTill < today) {
+    return { ok: false, reason: 'License expired' };
   }
 
+  return {
+    ok: true,
+    user: {
+      email,
+      name: user.name,
+      plan: user.plan,
+      validTill: user.validTill,
+      active: user.active,
+    },
+  };
+}
+
+app.get('/', (req, res) => {
   res.json({
     ok: true,
-    validTill: result.user.validTill,
-    plan: result.user.plan
+    service: 'Zapper Backend',
+    stt: '/stt',
   });
 });
 
-app.post('/api/razorpay/webhook', (req, res) => {
-  console.log('[RazorpayWebhook] Received event:', req.body?.event || 'unknown');
-  res.json({
-    ok: true,
-    message: 'Webhook received. Manual license update is enabled.'
-  });
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
+});
+
+app.post('/validate-license', (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const licenseKey = String(req.body.licenseKey || '').trim();
+
+  if (!email || !licenseKey) {
+    return res.status(400).json({ ok: false, reason: 'email and licenseKey required' });
+  }
+
+  const result = isLicenseValid(email, licenseKey);
+  return res.status(result.ok ? 200 : 401).json(result);
 });
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/stt' });
 
-function safeSend(client, payload) {
-  try {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify(payload));
-    }
-  } catch (err) {
-    console.error('[STT] safeSend error:', err.message);
-  }
+const wss = new WebSocket.Server({
+  server,
+  path: '/stt',
+});
+
+function buildDeepgramUrl() {
+  const params = new URLSearchParams({
+    model: 'nova-2',
+    language: 'en-US',
+    encoding: 'linear16',
+    sample_rate: '16000',
+    channels: '1',
+    interim_results: 'true',
+    punctuate: 'true',
+    smart_format: 'true',
+    endpointing: '100',
+  });
+
+  return `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 }
 
-wss.on('connection', (client, req) => {
+wss.on('connection', (clientWs, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-
-  const email = url.searchParams.get('email');
-  const licenseKey = url.searchParams.get('licenseKey');
-
-  const license = validateLicense(email, licenseKey);
-
-  if (!license.ok) {
-    const reason =
-      license.reason +
-      '. Open License in the overlay and activate with the same email/license generated by backend.';
-
-    safeSend(client, {
-      type: 'error',
-      message: reason
-    });
-
-    client.close(4001, reason);
-    return;
-  }
-
-  if (!DEEPGRAM_API_KEY) {
-    safeSend(client, {
-      type: 'error',
-      message: 'Backend Deepgram key is not configured'
-    });
-
-    client.close(4002, 'Deepgram key missing');
-    return;
-  }
+  const email = String(url.searchParams.get('email') || 'unknown').trim().toLowerCase();
 
   console.log(`[STT] Client connected: ${email}`);
 
-  safeSend(client, {
-    type: 'status',
-    text: 'License valid. Starting transcription...'
-  });
-
-  const deepgram = createClient(DEEPGRAM_API_KEY);
-
-  const dg = deepgram.listen.live({
-    model: DG_MODEL,
-    language: DG_LANGUAGE,
-    encoding: 'linear16',
-    sample_rate: 16000,
-    channels: 1,
-
-    // Low latency but stable
-    interim_results: true,
-    endpointing: DG_ENDPOINTING_MS,
-
-    // Formatting
-    punctuate: true,
-    smart_format: true
-  });
-
-  let dgReady = false;
-  let audioBuffer = [];
-
-  const keepAlive = setInterval(() => {
-    try {
-      dg?.keepAlive?.();
-    } catch (_) {}
-  }, 8000);
-
-  dg.on(LiveTranscriptionEvents.Open, () => {
-    dgReady = true;
-
-    console.log(`[Deepgram] Connected. model=${DG_MODEL}, endpointing=${DG_ENDPOINTING_MS}`);
-
-    safeSend(client, {
-      type: 'status',
-      text: `Deepgram connected (${DG_MODEL}). Captions active...`
-    });
-
-    for (const chunk of audioBuffer.splice(0)) {
-      try {
-        dg.send(chunk);
-      } catch (err) {
-        console.error('[Deepgram] buffered send error:', err.message);
-      }
-    }
-  });
-
-  dg.on(LiveTranscriptionEvents.Transcript, (data) => {
-    const alt = data?.channel?.alternatives?.[0];
-    const text = String(alt?.transcript || '').trim();
-
-    if (!text) return;
-
-    safeSend(client, {
-      type: 'transcript',
-      text,
-      isFinal: !!data?.is_final,
-      confidence: alt?.confidence || 0
-    });
-  });
-
-  dg.on(LiveTranscriptionEvents.SpeechStarted, () => {
-    safeSend(client, {
-      type: 'speech_started'
-    });
-  });
-
-  dg.on(LiveTranscriptionEvents.Error, (err) => {
-    const message = err?.message || String(err);
-
-    console.error('[Deepgram] Error:', message);
-
-    safeSend(client, {
+  if (!DEEPGRAM_API_KEY) {
+    clientWs.send(JSON.stringify({
       type: 'error',
-      message
+      message: 'DEEPGRAM_API_KEY missing on backend',
+    }));
+    clientWs.close();
+    return;
+  }
+
+  const dgWs = new WebSocket(buildDeepgramUrl(), {
+    headers: {
+      Authorization: `Token ${DEEPGRAM_API_KEY}`,
+    },
+  });
+
+  let dgOpen = false;
+
+  dgWs.on('open', () => {
+    dgOpen = true;
+    console.log('[Deepgram] WebSocket connected');
+  });
+
+  dgWs.on('unexpected-response', (request, response) => {
+    let body = '';
+
+    response.on('data', chunk => {
+      body += chunk.toString();
+    });
+
+    response.on('end', () => {
+      console.error('[Deepgram] Unexpected response');
+      console.error('[Deepgram] Status:', response.statusCode);
+      console.error('[Deepgram] Headers:', response.headers);
+      console.error('[Deepgram] Body:', body);
+
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({
+          type: 'error',
+          message: 'Deepgram connection failed',
+          status: response.statusCode,
+          body,
+          dgError: response.headers['dg-error'],
+          dgRequestId: response.headers['dg-request-id'],
+        }));
+      }
     });
   });
 
-  dg.on(LiveTranscriptionEvents.Close, () => {
-    console.log('[Deepgram] Closed');
-    dgReady = false;
-    clearInterval(keepAlive);
-  });
+  dgWs.on('message', data => {
+    try {
+      const msg = JSON.parse(data.toString());
 
-  client.on('message', (chunk) => {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const transcript =
+        msg?.channel?.alternatives?.[0]?.transcript || '';
 
-    if (dgReady) {
-      try {
-        dg.send(buf);
-      } catch (err) {
-        console.error('[STT] Deepgram send error:', err.message);
+      if (!transcript) return;
+
+      const payload = {
+        type: 'transcript',
+        text: transcript,
+        isFinal: Boolean(msg.is_final),
+        speechFinal: Boolean(msg.speech_final),
+      };
+
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify(payload));
       }
-      return;
-    }
-
-    audioBuffer.push(buf);
-
-    // Keep tiny pre-open buffer only. Avoid latency backlog.
-    if (audioBuffer.length > 8) {
-      audioBuffer.shift();
+    } catch (err) {
+      console.error('[Deepgram] Parse error:', err.message);
     }
   });
 
-  client.on('close', () => {
+  dgWs.on('close', (code, reason) => {
+    dgOpen = false;
+    console.log('[Deepgram] Closed:', code, reason.toString());
+
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify({
+        type: 'deepgram_closed',
+        code,
+        reason: reason.toString(),
+      }));
+    }
+  });
+
+  dgWs.on('error', err => {
+    console.error('[Deepgram] Error:', err.message);
+
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify({
+        type: 'error',
+        message: err.message,
+      }));
+    }
+  });
+
+  clientWs.on('message', audioChunk => {
+    if (!audioChunk || audioChunk.length === 0) return;
+
+    if (dgOpen && dgWs.readyState === WebSocket.OPEN) {
+      dgWs.send(audioChunk);
+    }
+  });
+
+  clientWs.on('close', () => {
     console.log(`[STT] Client disconnected: ${email}`);
 
-    clearInterval(keepAlive);
-
-    try {
-      dg.requestClose();
-    } catch (_) {}
-
-    try {
-      dg.finish();
-    } catch (_) {}
+    if (dgWs.readyState === WebSocket.OPEN) {
+      dgWs.send(JSON.stringify({ type: 'CloseStream' }));
+      dgWs.close();
+    }
   });
 
-  client.on('error', (err) => {
-    console.error('[STT] Client socket error:', err.message);
+  clientWs.on('error', err => {
+    console.error('[STT] Client error:', err.message);
   });
 });
 
-console.log('[BOOT] DEEPGRAM_API_KEY present:', !!process.env.DEEPGRAM_API_KEY);
-console.log('[BOOT] DEEPGRAM_API_KEY length:', process.env.DEEPGRAM_API_KEY?.length || 0);
-console.log('[BOOT] DG_MODEL:', DG_MODEL);
-console.log('[BOOT] DG_ENDPOINTING_MS:', DG_ENDPOINTING_MS);
-
 server.listen(PORT, () => {
-  console.log(`[Backend] Running on http://localhost:${PORT}`);
+  console.log(`[BOOT] Zapper backend running on port ${PORT}`);
 });
