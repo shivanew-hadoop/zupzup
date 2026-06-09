@@ -164,5 +164,6 @@ wss.on('connection', (client, req) => {
     try { dg.finish(); } catch (_) {}
   });
 });
-
+console.log('[BOOT] DEEPGRAM_API_KEY present:', !!process.env.DEEPGRAM_API_KEY);
+console.log('[BOOT] DEEPGRAM_API_KEY length:', process.env.DEEPGRAM_API_KEY?.length || 0);
 server.listen(PORT, () => console.log(`[Backend] Running on http://localhost:${PORT}`));
