@@ -96,7 +96,9 @@ function buildDeepgramUrl() {
     interim_results: 'true',
     punctuate: 'true',
     smart_format: 'true',
-    endpointing: '100',
+    endpointing: '50',
+    utterance_end_ms: '700',
+    vad_events: 'true',
   });
 
   return `wss://api.deepgram.com/v1/listen?${params.toString()}`;
@@ -105,8 +107,19 @@ function buildDeepgramUrl() {
 wss.on('connection', (clientWs, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const email = String(url.searchParams.get('email') || 'unknown').trim().toLowerCase();
+  const licenseKey = String(url.searchParams.get('licenseKey') || '').trim();
 
   console.log(`[STT] Client connected: ${email}`);
+
+  const licenseResult = isLicenseValid(email, licenseKey);
+  if (!licenseResult.ok) {
+    clientWs.send(JSON.stringify({
+      type: 'error',
+      message: licenseResult.reason || 'Invalid license',
+    }));
+    clientWs.close(1008, 'invalid license');
+    return;
+  }
 
   if (!DEEPGRAM_API_KEY) {
     clientWs.send(JSON.stringify({
@@ -117,108 +130,168 @@ wss.on('connection', (clientWs, req) => {
     return;
   }
 
-  const dgWs = new WebSocket(buildDeepgramUrl(), {
-    headers: {
-      Authorization: `Token ${DEEPGRAM_API_KEY}`,
-    },
-  });
-
+  let dgWs = null;
   let dgOpen = false;
+  let dgConnecting = false;
+  let keepAliveTimer = null;
+  let pendingAudio = [];
+  const MAX_PENDING_AUDIO = 50;
 
-  dgWs.on('open', () => {
-    dgOpen = true;
-    console.log('[Deepgram] WebSocket connected');
-  });
+  function sendClient(payload) {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify(payload));
+    }
+  }
 
-  dgWs.on('unexpected-response', (request, response) => {
-    let body = '';
+  function cleanupDeepgram() {
+    dgOpen = false;
+    dgConnecting = false;
 
-    response.on('data', chunk => {
-      body += chunk.toString();
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+
+    if (dgWs) {
+      try {
+        if (dgWs.readyState === WebSocket.OPEN) {
+          dgWs.send(JSON.stringify({ type: 'CloseStream' }));
+        }
+        dgWs.close();
+      } catch (_) {}
+      dgWs = null;
+    }
+  }
+
+  function connectDeepgram() {
+    if (dgWs && (dgWs.readyState === WebSocket.OPEN || dgWs.readyState === WebSocket.CONNECTING)) return;
+
+    dgOpen = false;
+    dgConnecting = true;
+    dgWs = new WebSocket(buildDeepgramUrl(), {
+      headers: {
+        Authorization: `Token ${DEEPGRAM_API_KEY}`,
+      },
     });
 
-    response.on('end', () => {
-      console.error('[Deepgram] Unexpected response');
-      console.error('[Deepgram] Status:', response.statusCode);
-      console.error('[Deepgram] Headers:', response.headers);
-      console.error('[Deepgram] Body:', body);
+    dgWs.on('open', () => {
+      dgOpen = true;
+      dgConnecting = false;
+      console.log('[Deepgram] WebSocket connected after first Meet audio');
+      sendClient({ type: 'status', text: 'Deepgram connected. Captions active.' });
 
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(JSON.stringify({
+      for (const chunk of pendingAudio.splice(0)) {
+        if (dgWs.readyState === WebSocket.OPEN) dgWs.send(chunk);
+      }
+
+      // Prevent Deepgram NET-0001 idle close during long silence. This keeps the
+      // socket alive without faking audio and supports long waiting/silent periods.
+      keepAliveTimer = setInterval(() => {
+        if (dgWs && dgWs.readyState === WebSocket.OPEN) {
+          try { dgWs.send(JSON.stringify({ type: 'KeepAlive' })); } catch (_) {}
+        }
+      }, 5000);
+    });
+
+    dgWs.on('unexpected-response', (request, response) => {
+      let body = '';
+
+      response.on('data', chunk => {
+        body += chunk.toString();
+      });
+
+      response.on('end', () => {
+        console.error('[Deepgram] Unexpected response');
+        console.error('[Deepgram] Status:', response.statusCode);
+        console.error('[Deepgram] Headers:', response.headers);
+        console.error('[Deepgram] Body:', body);
+
+        sendClient({
           type: 'error',
           message: 'Deepgram connection failed',
           status: response.statusCode,
           body,
           dgError: response.headers['dg-error'],
           dgRequestId: response.headers['dg-request-id'],
-        }));
+        });
+      });
+    });
+
+    dgWs.on('message', data => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.type === 'SpeechStarted') {
+          sendClient({ type: 'speech_started' });
+          return;
+        }
+
+        const transcript = msg?.channel?.alternatives?.[0]?.transcript || '';
+        if (!transcript) return;
+
+        sendClient({
+          type: 'transcript',
+          text: transcript,
+          isFinal: Boolean(msg.is_final),
+          speechFinal: Boolean(msg.speech_final),
+          confidence: Number(msg?.channel?.alternatives?.[0]?.confidence || 0),
+        });
+      } catch (err) {
+        console.error('[Deepgram] Parse error:', err.message);
       }
     });
-  });
 
-  dgWs.on('message', data => {
-    try {
-      const msg = JSON.parse(data.toString());
-
-      const transcript =
-        msg?.channel?.alternatives?.[0]?.transcript || '';
-
-      if (!transcript) return;
-
-      const payload = {
-        type: 'transcript',
-        text: transcript,
-        isFinal: Boolean(msg.is_final),
-        speechFinal: Boolean(msg.speech_final),
-      };
-
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(JSON.stringify(payload));
+    dgWs.on('close', (code, reason) => {
+      dgOpen = false;
+      dgConnecting = false;
+      if (keepAliveTimer) {
+        clearInterval(keepAliveTimer);
+        keepAliveTimer = null;
       }
-    } catch (err) {
-      console.error('[Deepgram] Parse error:', err.message);
-    }
-  });
 
-  dgWs.on('close', (code, reason) => {
-    dgOpen = false;
-    console.log('[Deepgram] Closed:', code, reason.toString());
+      const reasonText = reason.toString();
+      console.log('[Deepgram] Closed:', code, reasonText);
 
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({
-        type: 'deepgram_closed',
-        code,
-        reason: reason.toString(),
-      }));
-    }
-  });
+      // Do not close the app/client on Deepgram idle/network close. The next real
+      // audio chunk will reconnect and continue captions.
+      if (clientWs.readyState === WebSocket.OPEN && code !== 1000) {
+        sendClient({ type: 'status', text: 'Deepgram paused. Waiting for audio to reconnect captions...' });
+      }
+    });
 
-  dgWs.on('error', err => {
-    console.error('[Deepgram] Error:', err.message);
-
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({
-        type: 'error',
-        message: err.message,
-      }));
-    }
-  });
+    dgWs.on('error', err => {
+      dgOpen = false;
+      dgConnecting = false;
+      console.error('[Deepgram] Error:', err.message);
+      sendClient({ type: 'error', message: err.message });
+    });
+  }
 
   clientWs.on('message', audioChunk => {
     if (!audioChunk || audioChunk.length === 0) return;
 
+    if (!dgWs || dgWs.readyState === WebSocket.CLOSED || dgWs.readyState === WebSocket.CLOSING) {
+      pendingAudio.push(Buffer.from(audioChunk));
+      if (pendingAudio.length > MAX_PENDING_AUDIO) pendingAudio.shift();
+      connectDeepgram();
+      return;
+    }
+
     if (dgOpen && dgWs.readyState === WebSocket.OPEN) {
       dgWs.send(audioChunk);
+      return;
+    }
+
+    if (dgConnecting || dgWs.readyState === WebSocket.CONNECTING) {
+      pendingAudio.push(Buffer.from(audioChunk));
+      if (pendingAudio.length > MAX_PENDING_AUDIO) pendingAudio.shift();
     }
   });
 
   clientWs.on('close', () => {
     console.log(`[STT] Client disconnected: ${email}`);
-
-    if (dgWs.readyState === WebSocket.OPEN) {
-      dgWs.send(JSON.stringify({ type: 'CloseStream' }));
-      dgWs.close();
-    }
+    cleanupDeepgram();
+    pendingAudio = [];
   });
 
   clientWs.on('error', err => {
