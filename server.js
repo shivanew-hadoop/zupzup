@@ -96,8 +96,9 @@ function buildDeepgramUrl() {
     interim_results: 'true',
     punctuate: 'true',
     smart_format: 'true',
-    endpointing: '50',
-    utterance_end_ms: '700',
+    // Low latency finalization. Keep utterance_end_ms >= 1000; Deepgram can reject lower values.
+    endpointing: '300',
+    utterance_end_ms: '1000',
     vad_events: 'true',
   });
 
@@ -143,6 +144,18 @@ wss.on('connection', (clientWs, req) => {
     }
   }
 
+  function resetDeepgramState() {
+    dgOpen = false;
+    dgConnecting = false;
+
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+
+    dgWs = null;
+  }
+
   function cleanupDeepgram() {
     dgOpen = false;
     dgConnecting = false;
@@ -168,7 +181,11 @@ wss.on('connection', (clientWs, req) => {
 
     dgOpen = false;
     dgConnecting = true;
-    dgWs = new WebSocket(buildDeepgramUrl(), {
+
+    const deepgramUrl = buildDeepgramUrl();
+    console.log('[Deepgram] Connecting with params:', deepgramUrl.replace('wss://api.deepgram.com/v1/listen?', ''));
+
+    dgWs = new WebSocket(deepgramUrl, {
       headers: {
         Authorization: `Token ${DEEPGRAM_API_KEY}`,
       },
@@ -208,12 +225,14 @@ wss.on('connection', (clientWs, req) => {
 
         sendClient({
           type: 'error',
-          message: 'Deepgram connection failed',
+          message: body || `Deepgram connection failed with status ${response.statusCode}`,
           status: response.statusCode,
           body,
           dgError: response.headers['dg-error'],
           dgRequestId: response.headers['dg-request-id'],
         });
+
+        resetDeepgramState();
       });
     });
 
@@ -249,6 +268,8 @@ wss.on('connection', (clientWs, req) => {
         keepAliveTimer = null;
       }
 
+      dgWs = null;
+
       const reasonText = reason.toString();
       console.log('[Deepgram] Closed:', code, reasonText);
 
@@ -262,6 +283,7 @@ wss.on('connection', (clientWs, req) => {
     dgWs.on('error', err => {
       dgOpen = false;
       dgConnecting = false;
+      dgWs = null;
       console.error('[Deepgram] Error:', err.message);
       sendClient({ type: 'error', message: err.message });
     });
