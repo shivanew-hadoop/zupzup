@@ -10,6 +10,13 @@ const WebSocket = require('ws');
 const PORT = Number(process.env.PORT || 8080);
 const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 
+const DEEPGRAM_KEEPALIVE_MS = 5000;
+const BACKEND_CLIENT_PING_MS = 15000;
+const NO_SPEECH_KEEPALIVE_LIMIT_MS = 30 * 60 * 1000;
+const SILENCE_PCM_KEEPALIVE_AFTER_MS = 8000;
+const MAX_TRANSCRIPTION_SESSION_MS = 135 * 60 * 1000; // 2 hours 15 minutes
+const SILENCE_PCM_100MS_16K_MONO = Buffer.alloc(16000 * 2 / 10);
+
 const USERS_FILE = path.join(__dirname, 'users.json');
 
 if (!DEEPGRAM_API_KEY) {
@@ -137,12 +144,45 @@ wss.on('connection', (clientWs, req) => {
   let keepAliveTimer = null;
   let pendingAudio = [];
   const MAX_PENDING_AUDIO = 50;
+  let sessionLimitTimer = null;
+  let clientPingTimer = null;
+  let dgConnectedAt = 0;
+  let lastDeepgramAudioAt = 0;
+  let limitReached = false;
 
   function sendClient(payload) {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify(payload));
     }
   }
+
+  function clearSessionTimers() {
+    if (sessionLimitTimer) {
+      clearTimeout(sessionLimitTimer);
+      sessionLimitTimer = null;
+    }
+    if (clientPingTimer) {
+      clearInterval(clientPingTimer);
+      clientPingTimer = null;
+    }
+  }
+
+  function closeForTranscriptLimit() {
+    if (limitReached) return;
+    limitReached = true;
+    const message = 'Transcript limit reached: 2 hours 15 minutes. Captions are disconnecting now.';
+    console.log('[STT] ' + message);
+    sendClient({ type: 'limit_reached', message });
+    cleanupDeepgram();
+    try { clientWs.close(1000, 'transcript limit reached'); } catch (_) {}
+  }
+
+  sessionLimitTimer = setTimeout(closeForTranscriptLimit, MAX_TRANSCRIPTION_SESSION_MS);
+  clientPingTimer = setInterval(() => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      try { clientWs.ping(); } catch (_) {}
+    }
+  }, BACKEND_CLIENT_PING_MS);
 
   function resetDeepgramState() {
     dgOpen = false;
@@ -195,19 +235,31 @@ wss.on('connection', (clientWs, req) => {
       dgOpen = true;
       dgConnecting = false;
       console.log('[Deepgram] WebSocket connected after first Meet audio');
+      dgConnectedAt = Date.now();
+      lastDeepgramAudioAt = Date.now();
       sendClient({ type: 'status', text: 'Deepgram connected. Captions active.' });
 
       for (const chunk of pendingAudio.splice(0)) {
         if (dgWs.readyState === WebSocket.OPEN) dgWs.send(chunk);
       }
 
-      // Prevent Deepgram NET-0001 idle close during long silence. This keeps the
-      // socket alive without faking audio and supports long waiting/silent periods.
+      // Prevent Deepgram/Railway idle close during long silence. KeepAlive runs continuously;
+      // a tiny silent PCM frame is sent only during the first 30 minutes without speech/audio.
       keepAliveTimer = setInterval(() => {
         if (dgWs && dgWs.readyState === WebSocket.OPEN) {
           try { dgWs.send(JSON.stringify({ type: 'KeepAlive' })); } catch (_) {}
+
+          const now = Date.now();
+          const withinNoSpeechWindow = dgConnectedAt && (now - dgConnectedAt <= NO_SPEECH_KEEPALIVE_LIMIT_MS);
+          const noAudioRecently = now - lastDeepgramAudioAt >= SILENCE_PCM_KEEPALIVE_AFTER_MS;
+          if (withinNoSpeechWindow && noAudioRecently) {
+            try {
+              dgWs.send(SILENCE_PCM_100MS_16K_MONO);
+              lastDeepgramAudioAt = now;
+            } catch (_) {}
+          }
         }
-      }, 5000);
+      }, DEEPGRAM_KEEPALIVE_MS);
     });
 
     dgWs.on('unexpected-response', (request, response) => {
@@ -290,7 +342,9 @@ wss.on('connection', (clientWs, req) => {
   }
 
   clientWs.on('message', audioChunk => {
+    if (limitReached) return;
     if (!audioChunk || audioChunk.length === 0) return;
+    lastDeepgramAudioAt = Date.now();
 
     if (!dgWs || dgWs.readyState === WebSocket.CLOSED || dgWs.readyState === WebSocket.CLOSING) {
       pendingAudio.push(Buffer.from(audioChunk));
@@ -300,6 +354,7 @@ wss.on('connection', (clientWs, req) => {
     }
 
     if (dgOpen && dgWs.readyState === WebSocket.OPEN) {
+      lastDeepgramAudioAt = Date.now();
       dgWs.send(audioChunk);
       return;
     }
@@ -312,6 +367,7 @@ wss.on('connection', (clientWs, req) => {
 
   clientWs.on('close', () => {
     console.log(`[STT] Client disconnected: ${email}`);
+    clearSessionTimers();
     cleanupDeepgram();
     pendingAudio = [];
   });
