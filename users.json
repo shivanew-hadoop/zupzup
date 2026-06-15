@@ -15,10 +15,10 @@
   },
   "customer2@gmail.com": {
     "name": "2",
-    "licenseKey": "MCS-6FC2-CE2D-F599-419B-118E-7AAC",
+    "licenseKey": "MCS-6FC2-CE2D-F599-419B-118E-7AAA",
     "plan": "monthly",
     "validTill": "2026-07-09",
-    "active": true
+    "active": false
   },
   "customer3@gmail.com": {
     "name": "4",
