@@ -33,5 +33,12 @@
     "plan": "monthly",
     "validTill": "2026-06-14",
     "active": true
+  },
+  "satya.cherukuri93@gmail.com": {
+    "name": "RR Ref ",
+    "licenseKey": "MCS-59FB-568D-2C32-CE62-DB1D-57A4",
+    "plan": "monthly",
+    "validTill": "2026-06-16",
+    "active": true
   }
 }
