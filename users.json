@@ -38,7 +38,14 @@
     "name": "RR Ref ",
     "licenseKey": "MCS-59FB-568D-2C32-CE62-DB1D-57A4",
     "plan": "monthly",
-    "validTill": "2026-06-16",
+    "validTill": "2026-07-15",
+    "active": true
+  },
+  "kommeramahesh115@gmail.com": {
+    "name": "Muttu ",
+    "licenseKey": "MCS-2362-06B2-5E51-2265-9F8E-E40B",
+    "plan": "monthly",
+    "validTill": "2026-07-17",
     "active": true
   }
 }
