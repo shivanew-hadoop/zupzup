@@ -35,13 +35,14 @@ function loadUsers() {
   return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
 }
 
-function isLicenseValid(email, licenseKey) {
+function isLicenseValid(email) {
   const users = loadUsers();
-  const user = users[email];
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const userKey = Object.keys(users).find(key => String(key).trim().toLowerCase() === normalizedEmail);
+  const user = userKey ? users[userKey] : null;
 
-  if (!user) return { ok: false, reason: 'User not found' };
+  if (!user) return { ok: false, reason: 'Email not found' };
   if (!user.active) return { ok: false, reason: 'License inactive' };
-  if (user.licenseKey !== licenseKey) return { ok: false, reason: 'Invalid license key' };
 
   const today = new Date();
   const validTill = new Date(`${user.validTill}T23:59:59`);
@@ -53,7 +54,7 @@ function isLicenseValid(email, licenseKey) {
   return {
     ok: true,
     user: {
-      email,
+      email: normalizedEmail,
       name: user.name,
       plan: user.plan,
       validTill: user.validTill,
@@ -76,13 +77,12 @@ app.get('/health', (req, res) => {
 
 app.post('/validate-license', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
-  const licenseKey = String(req.body.licenseKey || '').trim();
 
-  if (!email || !licenseKey) {
-    return res.status(400).json({ ok: false, reason: 'email and licenseKey required' });
+  if (!email) {
+    return res.status(400).json({ ok: false, reason: 'email required' });
   }
 
-  const result = isLicenseValid(email, licenseKey);
+  const result = isLicenseValid(email);
   return res.status(result.ok ? 200 : 401).json(result);
 });
 
@@ -115,11 +115,10 @@ function buildDeepgramUrl() {
 wss.on('connection', (clientWs, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const email = String(url.searchParams.get('email') || 'unknown').trim().toLowerCase();
-  const licenseKey = String(url.searchParams.get('licenseKey') || '').trim();
 
   console.log(`[STT] Client connected: ${email}`);
 
-  const licenseResult = isLicenseValid(email, licenseKey);
+  const licenseResult = isLicenseValid(email);
   if (!licenseResult.ok) {
     clientWs.send(JSON.stringify({
       type: 'error',
